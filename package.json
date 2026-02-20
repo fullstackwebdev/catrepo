@@ -1,0 +1,11 @@
+{
+  "name": "catrepo",
+  "version": "1.0.0",
+  "description": "Flatten a repository into one text dump",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": ["repository", "dump", "flatten"],
+  "author": "",
+  "license": "MIT"
+}
