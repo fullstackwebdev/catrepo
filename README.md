@@ -2,6 +2,40 @@
 
 Flatten a repository into one text dump with an optional tree view showing file structure and token counts.
 
+## Example
+
+```bash
+catrepo . --exclude node_modules
+```
+
+Output:
+
+```
+# Catrepo dump – my-project – 2026-02-20T23:22:13.772781+00:00
+# ≈ 100681 tokens
+
+## File Structure
+
+└── .
+    ├── src
+    │   ├── utils.ts (1.2K tok)
+    │   ├── main.ts (3.5K tok)
+    │   └── types.ts (890 tok)
+    ├── tests
+    │   └── main.test.ts (1.1K tok)
+    ├── package.json (150 tok)
+    └── README.md (500 tok)
+
+2 directories, 6 files
+
+### src/utils.ts
+export function hello() { ... }
+
+### src/main.ts
+import { hello } from './utils';
+...
+```
+
 ## Features
 
 - **Tree View**: Shows file structure at the top with token counts and/or file sizes
