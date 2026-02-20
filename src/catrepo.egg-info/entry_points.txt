@@ -1,2 +1,0 @@
-[console_scripts]
-catrepo = catrepo.cli:main
