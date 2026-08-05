@@ -7,9 +7,13 @@ from typing import List, cast
 
 import click
 
-from .renderer import render
-from .walker import DEFAULT_MAX_SIZE, collect_files
 from .downloader import download_repo
+from .renderer import (
+    DEFAULT_CONTENTS_SORT,
+    DEFAULT_MAX_TOKEN_SIZE_MULTIPLIER,
+    render_repo,
+)
+from .walker import DEFAULT_MAX_SIZE
 
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
@@ -44,11 +48,12 @@ from .downloader import download_repo
 @click.option("--max-tokens", type=int, help="Hard cap; truncate largest files first")
 # GUARDRAIL: default flipped 20.0 → 0.0 — the size-only filter amputated real
 # source (click's core.py is 78× median); the filter is now opt-in AND
-# pattern-aware (only generated/noise files are eligible).
+# pattern-aware (only generated/noise files are eligible). Default imported from
+# renderer.py so cli/api can't drift.
 @click.option(
     "--max-token-size",
     type=float,
-    default=0.0,
+    default=DEFAULT_MAX_TOKEN_SIZE_MULTIPLIER,
     show_default=True,
     help=(
         "Opt-in filter (0 = off): exclude generated/noise files (lockfiles, "
@@ -96,7 +101,7 @@ from .downloader import download_repo
 @click.option(
     "--contents-sort",
     type=click.Choice(["mtime", "path"]),
-    default="mtime",
+    default=DEFAULT_CONTENTS_SORT,
     show_default=True,
     help=(
         "Order the file contents section: 'mtime' sorts newest-edited first, "
@@ -139,19 +144,15 @@ def main(
         raise click.UsageError("PATH or --remote-url required")
 
     try:
-        # GUARDRAIL: local/remote duplicated collect+render blocks collapsed into one
-        # helper — the two paths can't drift apart when options change.
+        # GUARDRAIL: collect+render plumbing lives in renderer.render_repo (shared
+        # with the API) — the two entry points can't drift apart when options change.
         def _render_root(root: Path) -> str:
-            files = collect_files(
+            return render_repo(
                 root,
-                include,
-                exclude,
+                include=include,
+                exclude=exclude,
                 max_size=max_size,
                 binary_strict=binary_strict,
-            )
-            return render(
-                files,
-                root,
                 max_tokens=max_tokens,
                 fmt=fmt,
                 max_token_size_multiplier=max_token_size,

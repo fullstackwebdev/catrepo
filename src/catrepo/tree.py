@@ -25,28 +25,83 @@ class TreeNode:
             self.children = []
 
 
+def _format_units(value: int, base: int, suffixes: Tuple[str, ...]) -> str:
+    """Format *value* in human-readable units — one ladder, two callers.
+
+    GUARDRAIL: _format_size and _format_tokens were two copies of the same
+    threshold ladder (different bases/suffixes only); the merged version must
+    produce byte-identical output — the tree parity tests depend on it.
+    """
+    if value < base:
+        return f"{value}"
+    for suffix in suffixes:
+        value /= base
+        if value < base:
+            return f"{value:.1f}{suffix}"
+    return f"{value:.1f}{suffixes[-1]}"
+
+
 def _format_size(size: int) -> str:
-    """Format size in human-readable format."""
-    if size < 1024:
-        return f"{size}"
-    elif size < 1024 * 1024:
-        return f"{size / 1024:.1f}K"
-    elif size < 1024 * 1024 * 1024:
-        return f"{size / (1024 * 1024):.1f}M"
-    else:
-        return f"{size / (1024 * 1024 * 1024):.1f}G"
+    """Format size in human-readable format (1024-based K/M/G)."""
+    return _format_units(size, 1024, ("K", "M", "G"))
 
 
 def _format_tokens(tokens: int) -> str:
-    """Format token count in human-readable format."""
-    if tokens < 1000:
-        return f"{tokens}"
-    elif tokens < 1000 * 1000:
-        return f"{tokens / 1000:.1f}K"
-    elif tokens < 1000 * 1000 * 1000:
-        return f"{tokens / (1000 * 1000):.1f}M"
+    """Format token count in human-readable format (1000-based K/M/B)."""
+    return _format_units(tokens, 1000, ("K", "M", "B"))
+
+
+# GUARDRAIL: calc_size/sort/trim were closures nested inside build_tree — hoisted
+# to module level with explicit params (same logic, byte-identical tree output).
+def _calc_size(node: TreeNode) -> Tuple[int, int]:
+    """Calculate total size and tokens for a directory (recursive)."""
+    if not node.is_dir:
+        return node.size, node.tokens
+
+    total_size = 0
+    total_tokens = 0
+    for child in node.children:
+        s, t = _calc_size(child)
+        total_size += s
+        total_tokens += t
+    node.size = total_size
+    node.tokens = total_tokens
+    return total_size, total_tokens
+
+
+def _sort_key(node: TreeNode, sort_by: str):
+    if sort_by == "size":
+        return -node.size
+    elif sort_by == "tokens":
+        return -node.tokens
+    else:  # name
+        return node.name.lower()
+
+
+def _sort_children(node: TreeNode, sort_by: str, dirs_first: bool) -> None:
+    """Recursively sort children (dirs first, then by *sort_by*)."""
+    if dirs_first:
+        dirs = [c for c in node.children if c.is_dir]
+        files_list = [c for c in node.children if not c.is_dir]
+        dirs.sort(key=lambda c: _sort_key(c, sort_by))
+        files_list.sort(key=lambda c: _sort_key(c, sort_by))
+        node.children = dirs + files_list
     else:
-        return f"{tokens / (1000 * 1000 * 1000):.1f}B"
+        node.children.sort(key=lambda c: _sort_key(c, sort_by))
+
+    for child in node.children:
+        if child.is_dir:
+            _sort_children(child, sort_by, dirs_first)
+
+
+def _trim_depth(node: TreeNode, depth: int, max_depth: int) -> None:
+    """Remove children beyond *max_depth* (recursive)."""
+    if depth >= max_depth:
+        node.children = []
+    else:
+        for child in node.children:
+            if child.is_dir:
+                _trim_depth(child, depth + 1, max_depth)
 
 
 def build_tree(
@@ -117,61 +172,14 @@ def build_tree(
                 node = child
 
     # Calculate directory sizes and tokens
-    def calc_size(node: TreeNode) -> Tuple[int, int]:
-        """Calculate total size and tokens for a directory."""
-        if not node.is_dir:
-            return node.size, node.tokens
-        
-        total_size = 0
-        total_tokens = 0
-        for child in node.children:
-            s, t = calc_size(child)
-            total_size += s
-            total_tokens += t
-        node.size = total_size
-        node.tokens = total_tokens
-        return total_size, total_tokens
-    
-    calc_size(root_node)
+    _calc_size(root_node)
     
     # Sort children
-    def sort_key(node: TreeNode):
-        if sort_by == "size":
-            return -node.size
-        elif sort_by == "tokens":
-            return -node.tokens
-        else:  # name
-            return node.name.lower()
-    
-    def sort_children(node: TreeNode):
-        """Recursively sort children."""
-        if dirs_first:
-            dirs = [c for c in node.children if c.is_dir]
-            files_list = [c for c in node.children if not c.is_dir]
-            dirs.sort(key=sort_key)
-            files_list.sort(key=sort_key)
-            node.children = dirs + files_list
-        else:
-            node.children.sort(key=sort_key)
-        
-        for child in node.children:
-            if child.is_dir:
-                sort_children(child)
-    
-    sort_children(root_node)
+    _sort_children(root_node, sort_by, dirs_first)
     
     # Apply max depth
     if max_depth is not None:
-        def trim_depth(node: TreeNode, depth: int):
-            """Remove children beyond max depth."""
-            if depth >= max_depth:
-                node.children = []
-            else:
-                for child in node.children:
-                    if child.is_dir:
-                        trim_depth(child, depth + 1)
-        
-        trim_depth(root_node, 0)
+        _trim_depth(root_node, 0, max_depth)
     
     return root_node
 

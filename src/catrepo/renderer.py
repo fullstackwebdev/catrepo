@@ -8,12 +8,12 @@ import statistics
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 from .loader import load_text
 from .tokenizer import approximate_tokens
-from .walker import FileInfo
 from .tree import generate_tree_view
+from .walker import DEFAULT_MAX_SIZE, FileInfo, collect_files
 
 # GUARDRAIL: the old size-only pareto filter dropped REAL source files (click's
 # core.py is 78× the median token count) — "outlier == noise" is false when a repo
@@ -29,6 +29,12 @@ NOISE_BASENAMES = frozenset({
     "changes.md", "changes.rst", "history.md", "news.md",
 })
 NOISE_SUFFIXES = (".min.js", ".min.css", ".map", ".csv", ".tsv")
+
+# GUARDRAIL: these two defaults were re-declared in cli.py click decorators AND
+# api.py cli_kwargs.get(...) — three copies, silent drift. Single source of truth:
+# render_repo's signature uses them, cli.py and api.py import them.
+DEFAULT_MAX_TOKEN_SIZE_MULTIPLIER = 0.0
+DEFAULT_CONTENTS_SORT = "mtime"
 
 
 def _is_noise_file(path: Path) -> bool:
@@ -71,24 +77,24 @@ class Dump:
         tree_show_size: bool = False,
         tree_sort_by: str = "name",
         tree_dirs_first: bool = True,
-        max_token_size_multiplier: float = 0.0,
-        contents_sort: str = "mtime",
+        max_token_size_multiplier: float = DEFAULT_MAX_TOKEN_SIZE_MULTIPLIER,
+        contents_sort: str = DEFAULT_CONTENTS_SORT,
     ) -> None:
         self.root = root
         self.files = files
         self.file_dumps: List[FileDump] = [FileDump(info, root) for info in files]
         self.total_tokens = sum(fd.tokens for fd in self.file_dumps)
-        
+
         # GUARDRAIL: filter is opt-in (multiplier <= 0 = off) and pattern-aware —
         # the size-only default-on version amputated real source (click's core.py).
         self._filter_outliers(max_token_size_multiplier)
-        
+
         # Tree options
         self.tree_max_depth = tree_max_depth
         self.tree_show_size = tree_show_size
         self.tree_sort_by = tree_sort_by
         self.tree_dirs_first = tree_dirs_first
-        
+
         if max_tokens is not None and self.total_tokens > max_tokens:
             self._truncate(max_tokens)
 
@@ -156,7 +162,7 @@ class Dump:
         lines = [f"# Catrepo dump – {repo_name} – {timestamp}"]
         lines.append(f"# ≈ {self.total_tokens} tokens")
         lines.append("")
-        
+
         # Tree view — always on (was gated behind show_tree which was always True; no-tag is harmful)
         lines.append("## File Structure")
         lines.append("")
@@ -172,7 +178,7 @@ class Dump:
         lines.append(tree_view)
         lines.append("```")
         lines.append("")
-        
+
         # Add file contents
         for fd in self.file_dumps:
             lines.append(f"\n### {fd.path.as_posix()}")
@@ -198,7 +204,126 @@ class Dump:
 
     def as_html(self, repo_name: str) -> str:
         timestamp = datetime.now(timezone.utc).isoformat()
-        style = """
+        # GUARDRAIL: the ~60-line CSS block is a module-level _HTML_STYLE constant
+        # (moved verbatim — html output must stay byte-identical).
+        lines = [
+            "<!DOCTYPE html>",
+            '<html lang="en">',
+            "<head>",
+            '<meta charset="UTF-8">',
+            '<meta name="viewport" content="width=device-width,initial-scale=1">',
+            f"<title>{repo_name} dump</title>",
+            _HTML_STYLE,
+            "</head>",
+            "<body>",
+            "<div class='container'>",
+            "<div class='header-card'>",
+            f"<h1>Catrepo dump – {repo_name}</h1>",
+            f"<p>{timestamp} · ≈ {self.total_tokens} tokens</p>",
+            "</div>",
+        ]
+        for fd in self.file_dumps:
+            path = html.escape(fd.path.as_posix())
+            lines.append("<details class='file-card'>")
+            lines.append(
+                "<summary>"
+                "<svg class='chevron' width='10' height='10'"
+                " viewBox='0 0 8 8' aria-hidden='true'>"
+                "<path d='M0 0 L6 4 L0 8z'/></svg>"
+                f"<span class='path'>{path}</span>"
+                "</summary>"
+            )
+            lines.append("<pre><code>")
+            lines.append(html.escape(fd.content))
+            lines.append("</code></pre>")
+            lines.append("</details>")
+        lines.append("</div></body></html>")
+        return "\n".join(lines)
+
+
+def render(
+    files: List[FileInfo],
+    root: Path,
+    *,
+    max_tokens: int | None = None,
+    fmt: str = "text",
+    tree_max_depth: Optional[int] = None,
+    tree_show_size: bool = False,
+    tree_sort_by: str = "name",
+    tree_dirs_first: bool = True,
+    max_token_size_multiplier: float = DEFAULT_MAX_TOKEN_SIZE_MULTIPLIER,
+    contents_sort: str = DEFAULT_CONTENTS_SORT,
+) -> str:
+    dump = Dump(
+        files,
+        root,
+        max_tokens=max_tokens,
+        tree_max_depth=tree_max_depth,
+        tree_show_size=tree_show_size,
+        tree_sort_by=tree_sort_by,
+        tree_dirs_first=tree_dirs_first,
+        max_token_size_multiplier=max_token_size_multiplier,
+        contents_sort=contents_sort,
+    )
+    resolved = root.resolve()
+    repo_name = resolved.name or resolved.parent.name
+    if fmt == "json":
+        return dump.as_json(repo_name)
+    if fmt == "html":
+        return dump.as_html(repo_name)
+    return dump.as_text(repo_name)
+
+
+def render_repo(
+    root: Path,
+    *,
+    include: Iterable[str] | None = None,
+    exclude: Iterable[str] | None = None,
+    max_size: int = DEFAULT_MAX_SIZE,
+    binary_strict: bool = True,
+    max_tokens: int | None = None,
+    fmt: str = "text",
+    max_token_size_multiplier: float = DEFAULT_MAX_TOKEN_SIZE_MULTIPLIER,
+    tree_max_depth: Optional[int] = None,
+    tree_show_size: bool = False,
+    tree_sort_by: str = "name",
+    tree_dirs_first: bool = True,
+    contents_sort: str = DEFAULT_CONTENTS_SORT,
+) -> str:
+    """Collect files under *root* and render a dump.
+
+    The single shared pipeline used by both the CLI and the programmatic API —
+    collect+render plumbing lives here, not duplicated in cli.py/api.py.
+    """
+    # GUARDRAIL: cli.py and api.py used to duplicate this collect+render call
+    # with identical option plumbing; one helper is the single source of truth
+    # so options can't drift between the two entry points again.
+    files = collect_files(
+        root,
+        include,
+        exclude,
+        max_size=max_size,
+        binary_strict=binary_strict,
+    )
+    return render(
+        files,
+        root,
+        max_tokens=max_tokens,
+        fmt=fmt,
+        max_token_size_multiplier=max_token_size_multiplier,
+        tree_max_depth=tree_max_depth,
+        tree_show_size=tree_show_size,
+        tree_sort_by=tree_sort_by,
+        tree_dirs_first=tree_dirs_first,
+        contents_sort=contents_sort,
+    )
+
+
+# GUARDRAIL: defined at the END so it never swallows surrounding code — a big
+# triple-quoted constant in the middle of the module is a syntax accident waiting
+# to happen (it already happened once during refactor). Indentation is preserved
+# VERBATIM from the original in-method string so html output stays byte-identical.
+_HTML_STYLE = """
         <style>
         html {
             font-size:14px;
@@ -296,69 +421,3 @@ class Dump:
         }
         </style>
         """
-        lines = [
-            "<!DOCTYPE html>",
-            '<html lang="en">',
-            "<head>",
-            '<meta charset="UTF-8">',
-            '<meta name="viewport" content="width=device-width,initial-scale=1">',
-            f"<title>{repo_name} dump</title>",
-            style,
-            "</head>",
-            "<body>",
-            "<div class='container'>",
-            "<div class='header-card'>",
-            f"<h1>Catrepo dump – {repo_name}</h1>",
-            f"<p>{timestamp} · ≈ {self.total_tokens} tokens</p>",
-            "</div>",
-        ]
-        for fd in self.file_dumps:
-            path = html.escape(fd.path.as_posix())
-            lines.append("<details class='file-card'>")
-            lines.append(
-                "<summary>"
-                "<svg class='chevron' width='10' height='10'"
-                " viewBox='0 0 8 8' aria-hidden='true'>"
-                "<path d='M0 0 L6 4 L0 8z'/></svg>"
-                f"<span class='path'>{path}</span>"
-                "</summary>"
-            )
-            lines.append("<pre><code>")
-            lines.append(html.escape(fd.content))
-            lines.append("</code></pre>")
-            lines.append("</details>")
-        lines.append("</div></body></html>")
-        return "\n".join(lines)
-
-
-def render(
-    files: List[FileInfo],
-    root: Path,
-    *,
-    max_tokens: int | None = None,
-    fmt: str = "text",
-    tree_max_depth: Optional[int] = None,
-    tree_show_size: bool = False,
-    tree_sort_by: str = "name",
-    tree_dirs_first: bool = True,
-    max_token_size_multiplier: float = 0.0,
-    contents_sort: str = "mtime",
-) -> str:
-    dump = Dump(
-        files,
-        root,
-        max_tokens=max_tokens,
-        tree_max_depth=tree_max_depth,
-        tree_show_size=tree_show_size,
-        tree_sort_by=tree_sort_by,
-        tree_dirs_first=tree_dirs_first,
-        max_token_size_multiplier=max_token_size_multiplier,
-        contents_sort=contents_sort,
-    )
-    resolved = root.resolve()
-    repo_name = resolved.name or resolved.parent.name
-    if fmt == "json":
-        return dump.as_json(repo_name)
-    if fmt == "html":
-        return dump.as_html(repo_name)
-    return dump.as_text(repo_name)

@@ -1,4 +1,4 @@
-"""Table-driven unit tests for _matches_gitignore_pattern.
+"""Table-driven unit tests for the shared gitignore/exclude matcher.
 
 Each test case is a (rel_path, pattern, expected) tuple covering every
 edge case in the gitignore matching logic.  These guard against
@@ -16,7 +16,7 @@ from pathlib import Path
 # Ensure the src package is importable
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from catrepo.walker import _matches_gitignore_pattern
+from catrepo.walker import _matches_pattern
 
 
 class TestMatchesGitignorePattern(unittest.TestCase):
@@ -31,13 +31,13 @@ class TestMatchesGitignorePattern(unittest.TestCase):
 
     def assert_match(self, rel_path: str, pattern: str, msg: str = "") -> None:
         self.assertTrue(
-            _matches_gitignore_pattern(rel_path, pattern),
+            _matches_pattern(rel_path, pattern),
             msg or f"{pattern!r} should match {rel_path!r}",
         )
 
     def assert_no_match(self, rel_path: str, pattern: str, msg: str = "") -> None:
         self.assertFalse(
-            _matches_gitignore_pattern(rel_path, pattern),
+            _matches_pattern(rel_path, pattern),
             msg or f"{pattern!r} should NOT match {rel_path!r}",
         )
 
