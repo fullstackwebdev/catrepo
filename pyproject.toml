@@ -4,15 +4,34 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "catrepo"
-version = "1.0.0"
 description = "Flatten a repository into one text dump with tree view"
 readme = "README.md"
-license = {text = "MIT"}
+# GUARDRAIL: license is TBD by owner decision — no license field or license
+# classifier until one is chosen; the LICENSE file carries the placeholder so
+# publishing without a license can't be forgotten.
 requires-python = ">=3.10"
+dynamic = ["version"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development",
+    "Topic :: Utilities",
+]
 dependencies = [
     "click>=8.0",
     "requests>=2.28",
 ]
+
+[project.optional-dependencies]
+# GUARDRAIL: tiktoken is optional — tokenizer.py falls back to len//4 when absent;
+# the 'tok' extra is how users opt into accurate token counts.
+tok = ["tiktoken>=0.5"]
+dev = ["build>=1.0", "twine>=4.0"]
 
 [project.scripts]
 catrepo = "catrepo.cli:main"
@@ -20,5 +39,12 @@ catrepo = "catrepo.cli:main"
 [project.urls]
 Homepage = "https://github.com/fullstack/catrepo"
 
+# GUARDRAIL: version is read from catrepo.__version__ (single source of truth).
+# setuptools resolves a simple literal via static AST analysis, so building in an
+# isolated env does NOT import the package (which would pull in requests).
+[tool.setuptools.dynamic]
+version = {attr = "catrepo.__version__"}
+
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["catrepo*"]

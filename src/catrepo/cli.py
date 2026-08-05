@@ -7,6 +7,7 @@ from typing import List, cast
 
 import click
 
+from . import __version__
 from .downloader import download_repo
 from .renderer import (
     DEFAULT_CONTENTS_SORT,
@@ -116,7 +117,9 @@ from .walker import DEFAULT_MAX_SIZE
     show_default=True,
     help="Encoding for --outfile",
 )
-@click.version_option()
+# GUARDRAIL: explicit version instead of click's metadata lookup — importlib.metadata
+# only works when installed (a bare checkout has no dist metadata and --version broke).
+@click.version_option(version=__version__)
 def main(
     path: Path | None,
     remote_url: str | None,
