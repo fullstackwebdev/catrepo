@@ -2,16 +2,39 @@
 
 from __future__ import annotations
 
+import html
 import json
+import statistics
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
-import html
 
 from .loader import load_text
 from .tokenizer import approximate_tokens
 from .walker import FileInfo
 from .tree import generate_tree_view
+
+# GUARDRAIL: the old size-only pareto filter dropped REAL source files (click's
+# core.py is 78× the median token count) — "outlier == noise" is false when a repo
+# has a legitimately large central module. Only files matching these generated/noise
+# names are now eligible for filtering; real source is never removed.
+NOISE_BASENAMES = frozenset({
+    # lockfiles / generated dependency artifacts
+    "uv.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+    "npm-shrinkwrap.json", "cargo.lock", "poetry.lock", "pipfile.lock",
+    "composer.lock", "gemfile.lock", "go.sum", "bun.lock",
+    # changelogs (long prose, low code density)
+    "changelog", "changelog.md", "changelog.rst",
+    "changes.md", "changes.rst", "history.md", "news.md",
+})
+NOISE_SUFFIXES = (".min.js", ".min.css", ".map", ".csv", ".tsv")
+
+
+def _is_noise_file(path: Path) -> bool:
+    """True if the file is generated/noise by name (lockfile, changelog, minified, data)."""
+    name = path.name.lower()
+    return name in NOISE_BASENAMES or name.endswith(NOISE_SUFFIXES)
 
 
 class FileDump:
@@ -21,12 +44,19 @@ class FileDump:
         self.path = info.path
         self.full_path = root / info.path
         self.size = info.size
+        # GUARDRAIL: FileDump used to throw away info.mtime, which made ordering
+        # the contents section by edit recency impossible — keep it for sorting.
+        self.mtime = info.mtime
         self.tokens = 0
         self.content = ""
         try:
             self.content = load_text(self.full_path)
             self.tokens = approximate_tokens(self.content)
-        except Exception:
+        except OSError:
+            # GUARDRAIL: was `except Exception` — that silently turned real bugs
+            # (typos, logic errors) into empty files. load_text handles decode errors
+            # internally (errors="replace") and can only raise OSError, so catch only
+            # what can actually happen — fail first on anything else.
             self.content = ""
             self.tokens = 0
 
@@ -37,22 +67,24 @@ class Dump:
         files: List[FileInfo],
         root: Path,
         max_tokens: int | None = None,
-        show_tree: bool = True,
         tree_max_depth: Optional[int] = None,
-        tree_show_tokens: bool = True,
         tree_show_size: bool = False,
         tree_sort_by: str = "name",
         tree_dirs_first: bool = True,
+        max_token_size_multiplier: float = 0.0,
+        contents_sort: str = "mtime",
     ) -> None:
         self.root = root
         self.files = files
         self.file_dumps: List[FileDump] = [FileDump(info, root) for info in files]
         self.total_tokens = sum(fd.tokens for fd in self.file_dumps)
         
+        # GUARDRAIL: filter is opt-in (multiplier <= 0 = off) and pattern-aware —
+        # the size-only default-on version amputated real source (click's core.py).
+        self._filter_outliers(max_token_size_multiplier)
+        
         # Tree options
-        self.show_tree = show_tree
         self.tree_max_depth = tree_max_depth
-        self.tree_show_tokens = tree_show_tokens
         self.tree_show_size = tree_show_size
         self.tree_sort_by = tree_sort_by
         self.tree_dirs_first = tree_dirs_first
@@ -60,11 +92,64 @@ class Dump:
         if max_tokens is not None and self.total_tokens > max_tokens:
             self._truncate(max_tokens)
 
+        # GUARDRAIL: contents sort must run AFTER _truncate — _truncate re-sorts
+        # file_dumps by token size and pops victims, so any order set before it is
+        # destroyed. Sort last so the presentation order is always the requested one.
+        self.contents_sort = contents_sort
+        self._sort_contents()
+
     def _truncate(self, limit: int) -> None:
         self.file_dumps.sort(key=lambda f: (f.tokens, f.path.as_posix()), reverse=True)
         while self.total_tokens > limit and self.file_dumps:
             victim = self.file_dumps.pop(0)
             self.total_tokens -= victim.tokens
+
+    def _sort_contents(self) -> None:
+        """Order the contents section for output.
+
+        "mtime": newest-edited first (tie-break: path, ascending).
+        "path":  alphabetical by relative path — deterministic alternative.
+        """
+        if self.contents_sort == "mtime":
+            # GUARDRAIL: tie-break on path is mandatory — git checkouts and remote
+            # zipball extractions stamp identical mtimes on every file, so without
+            # the tie-break the order would be arbitrary (non-deterministic output).
+            self.file_dumps.sort(key=lambda fd: (-fd.mtime, fd.path.as_posix()))
+        else:
+            self.file_dumps.sort(key=lambda fd: fd.path.as_posix())
+
+    def _filter_outliers(self, multiplier: float) -> None:
+        """Remove generated/noise files whose token count exceeds multiplier × median.
+
+        Disabled when ``multiplier <= 0``. When enabled, only files matching
+        known noise patterns (lockfiles, changelogs, minified bundles, data
+        dumps) are eligible — real source files are never removed.
+        """
+        if multiplier <= 0:
+            return
+        # GUARDRAIL: 0/negative multiplier must mean "off" — previously a user
+        # could not disable the filter at all (0 × median removed everything).
+        nonzero_tokens = [fd.tokens for fd in self.file_dumps if fd.tokens > 0]
+        if not nonzero_tokens:
+            return
+        median = statistics.median(nonzero_tokens)
+        threshold = median * multiplier
+        before = len(self.file_dumps)
+        before_tokens = self.total_tokens
+        self.file_dumps = [
+            fd for fd in self.file_dumps
+            if not (_is_noise_file(fd.path) and fd.tokens > threshold)
+        ]
+        self.total_tokens = sum(fd.tokens for fd in self.file_dumps)
+        removed = before - len(self.file_dumps)
+        if removed:
+            print(
+                f"[catrepo] pareto filter: median={median:,.0f} tok, "
+                f"threshold={threshold:,.0f} tok ({multiplier:.1f}×), "
+                f"removed {removed} noise file(s), "
+                f"{before_tokens:,} → {self.total_tokens:,} tokens",
+                file=sys.stderr,
+            )
 
     def as_text(self, repo_name: str) -> str:
         timestamp = datetime.now(timezone.utc).isoformat()
@@ -72,23 +157,21 @@ class Dump:
         lines.append(f"# ≈ {self.total_tokens} tokens")
         lines.append("")
         
-        # Add tree view at the top
-        if self.show_tree:
-            lines.append("## File Structure")
-            lines.append("")
-            lines.append("```")
-            tree_view = generate_tree_view(
-                self.files,
-                self.root,
-                max_depth=self.tree_max_depth,
-                show_tokens=self.tree_show_tokens,
-                show_size=self.tree_show_size,
-                sort_by=self.tree_sort_by,
-                dirs_first=self.tree_dirs_first,
-            )
-            lines.append(tree_view)
-            lines.append("```")
-            lines.append("")
+        # Tree view — always on (was gated behind show_tree which was always True; no-tag is harmful)
+        lines.append("## File Structure")
+        lines.append("")
+        lines.append("```")
+        tree_view = generate_tree_view(
+            self.files,
+            self.root,
+            max_depth=self.tree_max_depth,
+            show_size=self.tree_show_size,
+            sort_by=self.tree_sort_by,
+            dirs_first=self.tree_dirs_first,
+        )
+        lines.append(tree_view)
+        lines.append("```")
+        lines.append("")
         
         # Add file contents
         for fd in self.file_dumps:
@@ -254,23 +337,23 @@ def render(
     *,
     max_tokens: int | None = None,
     fmt: str = "text",
-    show_tree: bool = True,
     tree_max_depth: Optional[int] = None,
-    tree_show_tokens: bool = True,
     tree_show_size: bool = False,
     tree_sort_by: str = "name",
     tree_dirs_first: bool = True,
+    max_token_size_multiplier: float = 0.0,
+    contents_sort: str = "mtime",
 ) -> str:
     dump = Dump(
         files,
         root,
         max_tokens=max_tokens,
-        show_tree=show_tree,
         tree_max_depth=tree_max_depth,
-        tree_show_tokens=tree_show_tokens,
         tree_show_size=tree_show_size,
         tree_sort_by=tree_sort_by,
         tree_dirs_first=tree_dirs_first,
+        max_token_size_multiplier=max_token_size_multiplier,
+        contents_sort=contents_sort,
     )
     resolved = root.resolve()
     repo_name = resolved.name or resolved.parent.name

@@ -76,69 +76,46 @@ def build_tree(
     TreeNode:
         Root node of the tree structure.
     """
-    # Create a mapping of paths to their file info
-    file_map: Dict[str, FileInfo] = {}
-    for f in files:
-        file_map[str(f.path)] = f
-    
-    # Create root node
+    # GUARDRAIL: the old build recursed per file and linearly scanned each level's
+    # children to find the parent dir — O(files × depth × siblings). A path→node
+    # dict gives O(files × depth) with byte-identical output; node.path stays
+    # informational (rendering only uses name/size/tokens).
     root_node = TreeNode(
         name=root.name or str(root),
         path=root,
         is_dir=True,
     )
-    
+    dirs_by_path: Dict[Path, TreeNode] = {Path(): root_node}
+
     # Build tree structure
-    def add_to_tree(node: TreeNode, rel_path: Path, file_info: Optional[FileInfo]):
-        """Add a file or directory to the tree."""
-        parts = rel_path.parts
-        
-        if len(parts) == 1:
-            # This is a direct child
-            if file_info:
-                child = TreeNode(
-                    name=parts[0],
-                    path=rel_path,
-                    is_dir=False,
-                    size=file_info.size,
-                    tokens=file_info.size // 4,  # Approximate
+    for f in files:
+        node = root_node
+        rel = Path()
+        for i, part in enumerate(f.path.parts):
+            rel = rel / part
+            is_file = i == len(f.path.parts) - 1
+            if is_file:
+                node.children.append(
+                    TreeNode(
+                        name=part,
+                        path=rel,
+                        is_dir=False,
+                        size=f.size,
+                        tokens=f.size // 4,  # Approximate — keep for parity
+                    )
                 )
             else:
-                # Directory placeholder
-                child = TreeNode(
-                    name=parts[0],
-                    path=rel_path,
-                    is_dir=True,
-                )
-            node.children.append(child)
-            return child
-        else:
-            # Need to find or create intermediate directory
-            dir_name = parts[0]
-            dir_path = Path(parts[0])
-            
-            # Find existing child or create new one
-            child = None
-            for c in node.children:
-                if c.name == dir_name and c.is_dir:
-                    child = c
-                    break
-            
-            if child is None:
-                child = TreeNode(
-                    name=dir_name,
-                    path=dir_path,
-                    is_dir=True,
-                )
-                node.children.append(child)
-            
-            # Recurse with remaining path
-            return add_to_tree(child, Path(*parts[1:]), file_info)
-    
-    # Add all files to the tree
-    for file_info in files:
-        add_to_tree(root_node, file_info.path, file_info)
-    
+                child = dirs_by_path.get(rel)
+                if child is None:
+                    child = TreeNode(
+                        name=part,
+                        path=rel,
+                        is_dir=True,
+                    )
+                    dirs_by_path[rel] = child
+                    node.children.append(child)
+                node = child
+
     # Calculate directory sizes and tokens
     def calc_size(node: TreeNode) -> Tuple[int, int]:
         """Calculate total size and tokens for a directory."""
@@ -203,7 +180,6 @@ def render_tree(
     root: TreeNode,
     prefix: str = "",
     is_last: bool = True,
-    show_tokens: bool = True,
     show_size: bool = False,
 ) -> List[str]:
     """Render a tree node to lines of text.
@@ -216,8 +192,6 @@ def render_tree(
         Current prefix string for indentation.
     is_last:
         Whether this is the last child.
-    show_tokens:
-        Whether to show token counts.
     show_size:
         Whether to show file sizes.
     
@@ -234,17 +208,17 @@ def render_tree(
     # Build the line
     line_parts = [prefix + connector]
     
-    # Size info (optional)
-    if show_size and not root.is_dir:
-        line_parts.append(f"[{_format_size(root.size):>10}] ")
-    elif show_size and root.is_dir:
+    # GUARDRAIL: the old code had two IDENTICAL if/elif size branches (one for dir,
+    # one for file) — collapsed to one `if show_size`. Tree output is byte-identical.
+    if show_size:
         line_parts.append(f"[{_format_size(root.size):>10}] ")
     
     # Name
     line_parts.append(root.name)
     
-    # Token info for files
-    if show_tokens and not root.is_dir:
+    # Token info for files (always shown — the --tree-tokens flag was removed;
+    # GUARDRAIL: show_tokens param dropped, it was always True from the only caller)
+    if not root.is_dir:
         line_parts.append(f" ({_format_tokens(root.tokens)} tok)")
     
     lines.append("".join(line_parts))
@@ -260,7 +234,6 @@ def render_tree(
                 child,
                 prefix=new_prefix,
                 is_last=child_is_last,
-                show_tokens=show_tokens,
                 show_size=show_size,
             )
             lines.extend(child_lines)
@@ -272,7 +245,6 @@ def generate_tree_view(
     files: List[FileInfo],
     root: Path,
     max_depth: Optional[int] = None,
-    show_tokens: bool = True,
     show_size: bool = False,
     sort_by: str = "name",
     dirs_first: bool = True,
@@ -287,8 +259,6 @@ def generate_tree_view(
         Root directory.
     max_depth:
         Maximum depth to display.
-    show_tokens:
-        Whether to show token counts.
     show_size:
         Whether to show file sizes.
     sort_by:
@@ -312,7 +282,6 @@ def generate_tree_view(
     lines = render_tree(
         tree,
         is_last=True,
-        show_tokens=show_tokens,
         show_size=show_size,
     )
     

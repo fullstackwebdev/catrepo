@@ -7,6 +7,10 @@ __pycache__/
 .venv/
 venv/
 *.whl
+# one-off pip bootstrap installer — never commit it again
+# GUARDRAIL: get-pip.py was left in the repo because the venv had no pip;
+# bootstrap with it, then delete — it bloats every self-dump by 2.2MB
+get-pip.py
 .pytest_cache/
 .coverage
 htmlcov/

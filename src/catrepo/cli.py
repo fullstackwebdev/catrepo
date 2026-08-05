@@ -42,6 +42,20 @@ from .downloader import download_repo
     help="Skip files larger than this many bytes",
 )
 @click.option("--max-tokens", type=int, help="Hard cap; truncate largest files first")
+# GUARDRAIL: default flipped 20.0 → 0.0 — the size-only filter amputated real
+# source (click's core.py is 78× median); the filter is now opt-in AND
+# pattern-aware (only generated/noise files are eligible).
+@click.option(
+    "--max-token-size",
+    type=float,
+    default=0.0,
+    show_default=True,
+    help=(
+        "Opt-in filter (0 = off): exclude generated/noise files (lockfiles, "
+        "changelogs, minified bundles, .csv/.tsv) whose token count exceeds "
+        "N × median of all files. Real source files are never removed."
+    ),
+)
 @click.option(
     "--format",
     "fmt",
@@ -53,26 +67,12 @@ from .downloader import download_repo
     default=True,
     help="Use strict binary detection",
 )
-@click.option(
-    "--gitignore/--no-gitignore",
-    default=True,
-    help="Respect .gitignore patterns (default: on)",
-)
-@click.option(
-    "--tree/--no-tree",
-    default=True,
-    help="Show tree view at top of output (default: on)",
-)
+# GUARDRAIL: --gitignore, --tree, --tree-tokens removed — were always default=True; disabling leaks artifacts or strips useful output
 @click.option(
     "--tree-depth",
     type=int,
     default=None,
     help="Maximum depth for tree view (default: unlimited)",
-)
-@click.option(
-    "--tree-tokens/--no-tree-tokens",
-    default=True,
-    help="Show token counts in tree view (default: on)",
 )
 @click.option(
     "--tree-size/--no-tree-size",
@@ -89,6 +89,19 @@ from .downloader import download_repo
     "--tree-dirs-first/--tree-files-first",
     default=True,
     help="List directories before files in tree (default: dirs first)",
+)
+# GUARDRAIL: contents ordering is a deliberate default behavior change — mtime
+# newest-first is on by default; --contents-sort path gives deterministic
+# alphabetical order for stable diffs. Tree view is never affected.
+@click.option(
+    "--contents-sort",
+    type=click.Choice(["mtime", "path"]),
+    default="mtime",
+    show_default=True,
+    help=(
+        "Order the file contents section: 'mtime' sorts newest-edited first, "
+        "'path' sorts alphabetically. Tree view is unaffected."
+    ),
 )
 @click.option("--stdout/--no-stdout", default=True, help="Print dump to STDOUT")
 @click.option("--outfile", type=click.Path(path_type=Path), help="Write dump to file")
@@ -107,15 +120,14 @@ def main(
     exclude: List[str],
     max_size: int,
     max_tokens: int | None,
+    max_token_size: float,
     fmt: str,
     binary_strict: bool,
-    gitignore: bool,
-    tree: bool,
     tree_depth: int | None,
-    tree_tokens: bool,
     tree_size: bool,
     tree_sort: str,
     tree_dirs_first: bool,
+    contents_sort: str,
     stdout: bool,
     outfile: Path | None,
     encoding: str,
@@ -127,49 +139,34 @@ def main(
         raise click.UsageError("PATH or --remote-url required")
 
     try:
-        if remote_url:
-            with download_repo(remote_url, private_token) as tmp:
-                files = collect_files(
-                    tmp,
-                    include,
-                    exclude,
-                    max_size=max_size,
-                    binary_strict=binary_strict,
-                    use_gitignore=gitignore,
-                )
-                output = render(
-                    files,
-                    tmp,
-                    max_tokens=max_tokens,
-                    fmt=fmt,
-                    show_tree=tree,
-                    tree_max_depth=tree_depth,
-                    tree_show_tokens=tree_tokens,
-                    tree_show_size=tree_size,
-                    tree_sort_by=tree_sort,
-                    tree_dirs_first=tree_dirs_first,
-                )
-        else:
+        # GUARDRAIL: local/remote duplicated collect+render blocks collapsed into one
+        # helper — the two paths can't drift apart when options change.
+        def _render_root(root: Path) -> str:
             files = collect_files(
-                cast(Path, path),
+                root,
                 include,
                 exclude,
                 max_size=max_size,
                 binary_strict=binary_strict,
-                use_gitignore=gitignore,
             )
-            output = render(
+            return render(
                 files,
-                cast(Path, path),
+                root,
                 max_tokens=max_tokens,
                 fmt=fmt,
-                show_tree=tree,
+                max_token_size_multiplier=max_token_size,
                 tree_max_depth=tree_depth,
-                tree_show_tokens=tree_tokens,
                 tree_show_size=tree_size,
                 tree_sort_by=tree_sort,
                 tree_dirs_first=tree_dirs_first,
+                contents_sort=contents_sort,
             )
+
+        if remote_url:
+            with download_repo(remote_url, private_token) as tmp:
+                output = _render_root(tmp)
+        else:
+            output = _render_root(cast(Path, path))
     except Exception as exc:  # pragma: no cover - fatal CLI errors
         click.echo(str(exc), err=True)
         raise SystemExit(1)
