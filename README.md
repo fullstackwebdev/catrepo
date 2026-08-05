@@ -41,7 +41,7 @@ import { hello } from './utils';
 - **Tree View**: Always-on file structure at the top with token counts and optional file sizes
 - **Gitignore Support**: Respects `.gitignore` from the repo root *and* nested directories, with subtree pruning so ignored trees (e.g. `node_modules`) are never walked
 - **Pareto Filter**: Opt-in (`--max-token-size N`, off by default); when enabled, excludes generated/noise files (lockfiles, changelogs, minified bundles, `.csv`/`.tsv`) whose token count exceeds N × the median — real source files are never removed
-- **Contents Ordering**: File contents are listed newest-edited first (mtime, with a path tie-break) so recent work appears together; `--contents-sort path` gives deterministic alphabetical order
+- **Contents Ordering**: File contents are listed newest-edited first (mtime, with a path tie-break) so recent work appears together; `--contents-sort path` gives deterministic alphabetical order, and `--contents-sort ast` ranks files by importance for LLM context — entry points first (Python via a real AST, TypeScript/JS via a lexical proxy), then files reachable from them, ordered by complexity and import count
 - **Multiple Formats**: Output as text, JSON, or HTML
 - **Token Counting**: Approximate token counts for each file
 - **Remote Repos**: Download and dump remote GitHub/GitLab/Bitbucket repos
@@ -72,6 +72,7 @@ catrepo . --tree-depth 3 --tree-size --tree-sort tokens --tree-dirs-first
 
 # Contents order (default is newest-edited first)
 catrepo . --contents-sort path   # alphabetical instead
+catrepo . --contents-sort ast    # LLM-friendly: entry points first, then by complexity/imports
 
 # Opt-in noise filter (off by default): drop generated files over N × median tokens
 catrepo . --max-token-size 20
@@ -107,7 +108,7 @@ catrepo --remote-url https://github.com/user/repo
 --tree-size / --no-tree-size  Show file sizes in tree (default: off)
 --tree-sort [name|size|tokens]  Sort order for tree (default: name)
 --tree-dirs-first / --tree-files-first  Directories first in tree (default: dirs first)
---contents-sort [mtime|path]   Order file contents: newest-first (default) or alphabetical
+--contents-sort [mtime|path|ast]  Order contents: newest-first (default), alphabetical, or by AST importance
 --stdout / --no-stdout     Print to STDOUT
 --outfile PATH             Write to file
 --encoding TEXT            Output encoding (default: utf-8)

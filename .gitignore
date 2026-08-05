@@ -19,3 +19,7 @@ get-pip.py
 .pytest_cache/
 .coverage
 htmlcov/
+# test scratch dirs — created by tests, never committed
+# GUARDRAIL: tests build fixtures under the repo root (never /tmp); a crashed
+# test could leave one behind, so ignore them wholesale.
+.tmp_*

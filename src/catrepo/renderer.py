@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, List, Optional
 
+from .analyzer import rank_files
 from .loader import load_text
 from .tokenizer import approximate_tokens
 from .tree import generate_tree_view
@@ -115,12 +116,25 @@ class Dump:
 
         "mtime": newest-edited first (tie-break: path, ascending).
         "path":  alphabetical by relative path — deterministic alternative.
+        "ast":   importance ranking — entry points first, then reachable-from-
+                 entry files, then unreachable source, then non-source. Within
+                 each tier: complexity desc, then import count desc.
+                 Python is parsed with a real AST; TS/JS with a lexical proxy.
         """
         if self.contents_sort == "mtime":
             # GUARDRAIL: tie-break on path is mandatory — git checkouts and remote
             # zipball extractions stamp identical mtimes on every file, so without
             # the tie-break the order would be arbitrary (non-deterministic output).
             self.file_dumps.sort(key=lambda fd: (-fd.mtime, fd.path.as_posix()))
+        elif self.contents_sort == "ast":
+            # GUARDRAIL: rank from the ALREADY-LOADED FileDump contents — re-reading
+            # from disk would risk drift between what's ranked and what's dumped,
+            # and doubles I/O on big repos. Ranks are deterministic (path tie-break),
+            # so output stays stable even after _truncate re-sorts.
+            rank = rank_files({fd.path.as_posix(): fd.content for fd in self.file_dumps})
+            self.file_dumps.sort(
+                key=lambda fd: (rank.get(fd.path.as_posix(), len(rank) + 1), fd.path.as_posix())
+            )
         else:
             self.file_dumps.sort(key=lambda fd: fd.path.as_posix())
 

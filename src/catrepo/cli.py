@@ -99,14 +99,19 @@ from .walker import DEFAULT_MAX_SIZE
 # GUARDRAIL: contents ordering is a deliberate default behavior change — mtime
 # newest-first is on by default; --contents-sort path gives deterministic
 # alphabetical order for stable diffs. Tree view is never affected.
+# GUARDRAIL: 'ast' sorts by importance — Python via a real AST, TS/JS via a
+# lexical proxy (no native deps). Entry points first, then by complexity and
+# import count. Default stays 'mtime' (newest first) for parity.
 @click.option(
     "--contents-sort",
-    type=click.Choice(["mtime", "path"]),
+    type=click.Choice(["mtime", "path", "ast"]),
     default=DEFAULT_CONTENTS_SORT,
     show_default=True,
     help=(
         "Order the file contents section: 'mtime' sorts newest-edited first, "
-        "'path' sorts alphabetically. Tree view is unaffected."
+        "'path' sorts alphabetically, 'ast' ranks by importance (entry points "
+        "first, then complexity/import count — Python via a real AST, TS/JS "
+        "via a lexical proxy). Tree view is unaffected."
     ),
 )
 @click.option("--stdout/--no-stdout", default=True, help="Print dump to STDOUT")
