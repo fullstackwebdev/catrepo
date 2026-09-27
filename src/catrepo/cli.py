@@ -21,6 +21,7 @@ from .walker import DEFAULT_MAX_SIZE
 @click.argument(
     "path",
     required=False,
+    default=".",
     type=click.Path(exists=True, file_okay=False, path_type=Path),
 )
 @click.option("--remote-url", help="Git repo URL to download")
@@ -31,12 +32,15 @@ from .walker import DEFAULT_MAX_SIZE
     default=["*"],
     help=("Glob(s) to include. Trailing '/' or '\\' expands recursively."),
 )
+# GUARDRAIL: bare `catrepo` must exclude jsonl/log/venv/git/node_modules by default
+# — without these, a single session transcript (4MB) blows past any token cap
 @click.option(
     "--exclude",
     multiple=True,
+    default=["*.jsonl", "*.log", ".venv/", ".git/", "node_modules/"],
     help=(
         "Glob(s) to exclude. Trailing '/' or '\\' expands recursively. "
-        "'.git/' is excluded by default."
+        "Default: *.jsonl, *.log, .venv/, .git/, node_modules/"
     ),
 )
 @click.option(
@@ -87,7 +91,7 @@ from .walker import DEFAULT_MAX_SIZE
 )
 @click.option(
     "--tree-sort",
-    type=click.Choice(["name", "size", "tokens"]),
+    type=click.Choice(["name", "size", "tokens", "mtime"]),
     default="name",
     help="Sort order for tree view (default: name)",
 )
@@ -114,8 +118,14 @@ from .walker import DEFAULT_MAX_SIZE
         "via a lexical proxy). Tree view is unaffected."
     ),
 )
-@click.option("--stdout/--no-stdout", default=True, help="Print dump to STDOUT")
-@click.option("--outfile", type=click.Path(path_type=Path), help="Write dump to file")
+@click.option(
+    "--tree-lines/--no-tree-lines",
+    default=True,
+    help="Show line ranges [Lstart-Lend] in tree view (default: on)",
+)
+@click.option("--stdout/--no-stdout", default=False, help="Print dump to STDOUT (default: off)")
+# GUARDRAIL: outfile defaults to CATREPO.md so bare `catrepo` produces a file, not stdout
+@click.option("--outfile", type=click.Path(path_type=Path), default="CATREPO.md", show_default=True, help="Write dump to file")
 @click.option(
     "--encoding",
     default="utf-8",
@@ -141,15 +151,20 @@ def main(
     tree_sort: str,
     tree_dirs_first: bool,
     contents_sort: str,
+    tree_lines: bool,
     stdout: bool,
     outfile: Path | None,
     encoding: str,
 ) -> None:
     """Flatten a repository into one text dump."""
-    if remote_url and path:
+    # GUARDRAIL: path now defaults to "." so bare `catrepo` works — only error if remote_url with explicit path
+    if remote_url and path and str(path) != ".":
         raise click.UsageError("--remote-url cannot be used with PATH")
-    if not remote_url and not path:
-        raise click.UsageError("PATH or --remote-url required")
+
+    # GUARDRAIL: --contents-sort mtime must also set tree_sort so the tree matches the content order
+    # — without this, the tree sorts by name while content is by mtime, making line numbers confusing
+    if contents_sort == "mtime" and tree_sort == "name":
+        tree_sort = "mtime"
 
     try:
         # GUARDRAIL: collect+render plumbing lives in renderer.render_repo (shared
@@ -169,6 +184,7 @@ def main(
                 tree_sort_by=tree_sort,
                 tree_dirs_first=tree_dirs_first,
                 contents_sort=contents_sort,
+                tree_show_lines=tree_lines,
             )
 
         if remote_url:

@@ -80,6 +80,7 @@ class Dump:
         tree_dirs_first: bool = True,
         max_token_size_multiplier: float = DEFAULT_MAX_TOKEN_SIZE_MULTIPLIER,
         contents_sort: str = DEFAULT_CONTENTS_SORT,
+        tree_show_lines: bool = False,
     ) -> None:
         self.root = root
         self.files = files
@@ -95,6 +96,9 @@ class Dump:
         self.tree_show_size = tree_show_size
         self.tree_sort_by = tree_sort_by
         self.tree_dirs_first = tree_dirs_first
+        # GUARDRAIL: tree_show_lines requires computing line offsets before rendering the tree —
+        # the tree is at the top of the doc so line numbers must be pre-computed
+        self.tree_show_lines = tree_show_lines
 
         if max_tokens is not None and self.total_tokens > max_tokens:
             self._truncate(max_tokens)
@@ -173,6 +177,29 @@ class Dump:
 
     def as_text(self, repo_name: str) -> str:
         timestamp = datetime.now(timezone.utc).isoformat()
+        
+        # GUARDRAIL: compute line ranges BEFORE building the tree — the tree is at the top
+        # so it needs to know where each file's content will land in the final document
+        line_ranges = None
+        if self.tree_show_lines:
+            line_ranges = {}
+            # Two-pass: generate tree without lines first to get its height
+            tree_view_no_lines = generate_tree_view(
+                self.files,
+                self.root,
+                max_depth=self.tree_max_depth,
+                show_size=self.tree_show_size,
+                sort_by=self.tree_sort_by,
+                dirs_first=self.tree_dirs_first,
+            )
+            tree_height = tree_view_no_lines.count("\n") + 1
+            # Header: title(1) + tokens(1) + blank(1) + "## File Structure"(1) + blank(1) + "```"(1) + tree + "```"(1) + blank(1)
+            offset = 8 + tree_height
+            for fd in self.file_dumps:
+                file_lines = fd.content.count("\n") + 1 if fd.content else 1
+                line_ranges[fd.path.as_posix()] = (offset, offset + file_lines - 1)
+                offset += file_lines + 2  # +2 for "\n### path" header line
+        
         lines = [f"# Catrepo dump – {repo_name} – {timestamp}"]
         lines.append(f"# ≈ {self.total_tokens} tokens")
         lines.append("")
@@ -188,6 +215,7 @@ class Dump:
             show_size=self.tree_show_size,
             sort_by=self.tree_sort_by,
             dirs_first=self.tree_dirs_first,
+            line_ranges=line_ranges,
         )
         lines.append(tree_view)
         lines.append("```")
@@ -267,6 +295,7 @@ def render(
     tree_dirs_first: bool = True,
     max_token_size_multiplier: float = DEFAULT_MAX_TOKEN_SIZE_MULTIPLIER,
     contents_sort: str = DEFAULT_CONTENTS_SORT,
+    tree_show_lines: bool = False,
 ) -> str:
     dump = Dump(
         files,
@@ -278,6 +307,7 @@ def render(
         tree_dirs_first=tree_dirs_first,
         max_token_size_multiplier=max_token_size_multiplier,
         contents_sort=contents_sort,
+        tree_show_lines=tree_show_lines,
     )
     resolved = root.resolve()
     repo_name = resolved.name or resolved.parent.name
@@ -303,6 +333,7 @@ def render_repo(
     tree_sort_by: str = "name",
     tree_dirs_first: bool = True,
     contents_sort: str = DEFAULT_CONTENTS_SORT,
+    tree_show_lines: bool = False,
 ) -> str:
     """Collect files under *root* and render a dump.
 
@@ -330,6 +361,7 @@ def render_repo(
         tree_sort_by=tree_sort_by,
         tree_dirs_first=tree_dirs_first,
         contents_sort=contents_sort,
+        tree_show_lines=tree_show_lines,
     )
 
 

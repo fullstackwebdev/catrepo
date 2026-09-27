@@ -19,6 +19,10 @@ class TreeNode:
     size: int = 0
     tokens: int = 0
     children: List['TreeNode'] = None
+    # GUARDRAIL: path only stores the last component for nested files — rel_path_str
+    # stores the full relative path from root, which is what line_ranges keys use
+    rel_path_str: str = ""
+    mtime: float = 0.0
     
     def __post_init__(self):
         if self.children is None:
@@ -69,11 +73,14 @@ def _calc_size(node: TreeNode) -> Tuple[int, int]:
     return total_size, total_tokens
 
 
+# GUARDRAIL: mtime sort uses negative mtime so newest files come first (matching ls -lat)
 def _sort_key(node: TreeNode, sort_by: str):
     if sort_by == "size":
         return -node.size
     elif sort_by == "tokens":
         return -node.tokens
+    elif sort_by == "mtime":
+        return -node.mtime
     else:  # name
         return node.name.lower()
 
@@ -157,6 +164,8 @@ def build_tree(
                         is_dir=False,
                         size=f.size,
                         tokens=f.size // 4,  # Approximate — keep for parity
+                        rel_path_str=f.path.as_posix(),
+                        mtime=f.mtime,
                     )
                 )
             else:
@@ -184,11 +193,17 @@ def build_tree(
     return root_node
 
 
+# GUARDRAIL: line_ranges maps str(path) -> (start_line, end_line) for the final document.
+# Without this, the tree is just a file listing with no way to navigate the dump.
+LineRanges = Dict[str, Tuple[int, int]]
+
+
 def render_tree(
     root: TreeNode,
     prefix: str = "",
     is_last: bool = True,
     show_size: bool = False,
+    line_ranges: Optional[LineRanges] = None,
 ) -> List[str]:
     """Render a tree node to lines of text.
     
@@ -202,6 +217,8 @@ def render_tree(
         Whether this is the last child.
     show_size:
         Whether to show file sizes.
+    line_ranges:
+        Optional dict mapping file path -> (start_line, end_line) in the document.
     
     Returns
     -------
@@ -229,6 +246,14 @@ def render_tree(
     if not root.is_dir:
         line_parts.append(f" ({_format_tokens(root.tokens)} tok)")
     
+    # GUARDRAIL: use rel_path_str (full relative path) not root.path (last component only)
+    # — nested files like cairn/rules.py have path=Path('cairn/rules.py') which matches line_ranges keys
+    if line_ranges and not root.is_dir:
+        key = root.rel_path_str if root.rel_path_str else root.path.as_posix()
+        if key in line_ranges:
+            start, end = line_ranges[key]
+            line_parts.append(f" [L{start}-L{end}]")
+    
     lines.append("".join(line_parts))
     
     # Render children
@@ -243,6 +268,7 @@ def render_tree(
                 prefix=new_prefix,
                 is_last=child_is_last,
                 show_size=show_size,
+                line_ranges=line_ranges,
             )
             lines.extend(child_lines)
     
@@ -256,6 +282,7 @@ def generate_tree_view(
     show_size: bool = False,
     sort_by: str = "name",
     dirs_first: bool = True,
+    line_ranges: Optional[LineRanges] = None,
 ) -> str:
     """Generate a tree view of the file structure.
 
@@ -273,6 +300,8 @@ def generate_tree_view(
         Sort criterion.
     dirs_first:
         Whether to list directories first.
+    line_ranges:
+        Optional dict mapping file path -> (start_line, end_line).
 
     Returns
     -------
@@ -291,6 +320,7 @@ def generate_tree_view(
         tree,
         is_last=True,
         show_size=show_size,
+        line_ranges=line_ranges,
     )
     
     # Count directories and files
