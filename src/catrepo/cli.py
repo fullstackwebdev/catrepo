@@ -12,7 +12,9 @@ from .downloader import download_repo
 from .renderer import (
     DEFAULT_CONTENTS_SORT,
     DEFAULT_MAX_TOKEN_SIZE_MULTIPLIER,
-    render_repo,
+    build_dump,
+    dump_to_format,
+    repo_name_for,
 )
 from .walker import DEFAULT_MAX_SIZE
 
@@ -69,7 +71,7 @@ from .walker import DEFAULT_MAX_SIZE
 @click.option(
     "--format",
     "fmt",
-    type=click.Choice(["text", "json", "html"]),
+    type=click.Choice(["text", "json", "jsonl", "html"]),
     default="text",
 )
 @click.option(
@@ -132,6 +134,25 @@ from .walker import DEFAULT_MAX_SIZE
     show_default=True,
     help="Encoding for --outfile",
 )
+# GUARDRAIL: structured siblings are ON by default — the memory system consumes the
+# .json/.jsonl, and making them opt-in meant every consumer re-parsed the tree text.
+@click.option(
+    "--structured/--no-structured",
+    default=True,
+    help="Also write structured .json and .jsonl dumps (default: on)",
+)
+@click.option(
+    "--json-out",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Path for structured JSON (default: <outfile>.json)",
+)
+@click.option(
+    "--jsonl-out",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Path for JSONL, one file per line (default: <outfile>.jsonl)",
+)
 # GUARDRAIL: explicit version instead of click's metadata lookup — importlib.metadata
 # only works when installed (a bare checkout has no dist metadata and --version broke).
 @click.version_option(version=__version__)
@@ -155,6 +176,9 @@ def main(
     stdout: bool,
     outfile: Path | None,
     encoding: str,
+    structured: bool,
+    json_out: Path | None,
+    jsonl_out: Path | None,
 ) -> None:
     """Flatten a repository into one text dump."""
     # GUARDRAIL: path now defaults to "." so bare `catrepo` works — only error if remote_url with explicit path
@@ -167,17 +191,16 @@ def main(
         tree_sort = "mtime"
 
     try:
-        # GUARDRAIL: collect+render plumbing lives in renderer.render_repo (shared
-        # with the API) — the two entry points can't drift apart when options change.
-        def _render_root(root: Path) -> str:
-            return render_repo(
+        # GUARDRAIL: build the Dump ONCE — text + json + jsonl are three views of the
+        # same walk; calling render_repo three times re-reads every file three times.
+        def _build(root: Path):
+            dump = build_dump(
                 root,
                 include=include,
                 exclude=exclude,
                 max_size=max_size,
                 binary_strict=binary_strict,
                 max_tokens=max_tokens,
-                fmt=fmt,
                 max_token_size_multiplier=max_token_size,
                 tree_max_depth=tree_depth,
                 tree_show_size=tree_size,
@@ -186,18 +209,29 @@ def main(
                 contents_sort=contents_sort,
                 tree_show_lines=tree_lines,
             )
+            return dump, repo_name_for(root)
 
         if remote_url:
             with download_repo(remote_url, private_token) as tmp:
-                output = _render_root(tmp)
+                dump, repo = _build(tmp)
         else:
-            output = _render_root(cast(Path, path))
+            dump, repo = _build(cast(Path, path))
     except Exception as exc:  # pragma: no cover - fatal CLI errors
         click.echo(str(exc), err=True)
         raise SystemExit(1)
 
+    output = dump_to_format(dump, repo, fmt)
     if outfile:
         outfile.write_text(output, encoding=encoding, errors="replace")
+
+    # GUARDRAIL: structured siblings are derived from --outfile so consumers get
+    # machine-readable data without a second required flag; -no-structured disables.
+    if structured and outfile:
+        json_path = json_out or outfile.with_suffix(".json")
+        jsonl_path = jsonl_out or outfile.with_suffix(".jsonl")
+        json_path.write_text(dump.as_json(repo), encoding=encoding, errors="replace")
+        jsonl_path.write_text(dump.as_jsonl(repo), encoding=encoding, errors="replace")
+
     if stdout:
         click.echo(output)
 

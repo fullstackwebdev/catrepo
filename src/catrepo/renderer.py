@@ -175,30 +175,35 @@ class Dump:
                 file=sys.stderr,
             )
 
-    def as_text(self, repo_name: str) -> str:
-        timestamp = datetime.now(timezone.utc).isoformat()
-        
-        # GUARDRAIL: compute line ranges BEFORE building the tree — the tree is at the top
-        # so it needs to know where each file's content will land in the final document
-        line_ranges = None
-        if self.tree_show_lines:
-            line_ranges = {}
-            # Two-pass: generate tree without lines first to get its height
-            tree_view_no_lines = generate_tree_view(
-                self.files,
-                self.root,
-                max_depth=self.tree_max_depth,
-                show_size=self.tree_show_size,
-                sort_by=self.tree_sort_by,
-                dirs_first=self.tree_dirs_first,
-            )
-            tree_height = tree_view_no_lines.count("\n") + 1
-            # Header: title(1) + tokens(1) + blank(1) + "## File Structure"(1) + blank(1) + "```"(1) + tree + "```"(1) + blank(1)
-            offset = 8 + tree_height
-            for fd in self.file_dumps:
-                file_lines = fd.content.count("\n") + 1 if fd.content else 1
-                line_ranges[fd.path.as_posix()] = (offset, offset + file_lines - 1)
-                offset += file_lines + 2  # +2 for "\n### path" header line
+    # GUARDRAIL: the old line-range math used a magic constant (`offset = 8 + tree_height`)
+    # and was off by -2 for EVERY file — the range started at the blank line *before* the
+    # `### path` header, so a consumer slicing it prepended junk and dropped the file's last
+    # lines. Never re-introduce arithmetic offsets; derive ranges from the rendered document.
+    def _compute_line_ranges(self) -> dict[str, tuple[int, int]]:
+        """Map file path -> (header_line, last_content_line) in the as_text output.
+
+        Renders once WITHOUT annotations (annotations never add/remove lines, so the
+        numbering is identical) and reads the real `### path` header lines, filtered to
+        known file paths so markdown headings inside contents aren't mistaken for headers.
+        """
+        probe = self._render_text("__probe__", line_ranges=None, timestamp="__probe__")
+        probe_lines = probe.split("\n")
+        known = {fd.path.as_posix() for fd in self.file_dumps}
+        header_line: dict[str, int] = {}
+        for i, ln in enumerate(probe_lines, start=1):
+            if ln.startswith("### ") and ln[4:].strip() in known:
+                header_line[ln[4:].strip()] = i
+        ranges: dict[str, tuple[int, int]] = {}
+        for fd in self.file_dumps:
+            p = fd.path.as_posix()
+            s = header_line.get(p)
+            if s is None:
+                continue
+            file_lines = fd.content.count("\n") + 1 if fd.content else 1
+            ranges[p] = (s, s + file_lines)
+        return ranges
+
+    def _render_text(self, repo_name: str, line_ranges: dict[str, tuple[int, int]] | None, timestamp: str) -> str:
         
         lines = [f"# Catrepo dump – {repo_name} – {timestamp}"]
         lines.append(f"# ≈ {self.total_tokens} tokens")
@@ -228,21 +233,55 @@ class Dump:
         lines.append("")
         return "\n".join(lines)
 
-    def as_json(self, repo_name: str) -> str:
-        obj = {
+    def as_text(self, repo_name: str) -> str:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        line_ranges = self._compute_line_ranges() if self.tree_show_lines else None
+        return self._render_text(repo_name, line_ranges, timestamp)
+
+    def as_structure(self, repo_name: str) -> dict:
+        """Structured dump: metadata + one record per file (path, tokens, line range, content).
+
+        This is the machine-readable form the memory system consumes, so no one has to
+        parse the tree annotations out of the text again.
+        """
+        timestamp = datetime.now(timezone.utc).isoformat()
+        line_ranges = self._compute_line_ranges() if self.tree_show_lines else {}
+        files = []
+        for fd in self.file_dumps:
+            p = fd.path.as_posix()
+            start, end = line_ranges.get(p, (None, None))
+            files.append({
+                "path": p,
+                "tokens": fd.tokens,
+                "lines": fd.content.count("\n") + 1 if fd.content else 0,
+                "start_line": start,
+                "end_line": end,
+                "content": fd.content,
+            })
+        return {
+            "format": "catrepo/v1",
             "repo": repo_name,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": timestamp,
             "total_tokens": self.total_tokens,
-            "files": [
-                {
-                    "path": fd.path.as_posix(),
-                    "contents": fd.content,
-                    "tokens": fd.tokens,
-                }
-                for fd in self.file_dumps
-            ],
+            "file_count": len(files),
+            "files": files,
         }
-        return json.dumps(obj, indent=2)
+
+    def as_json(self, repo_name: str) -> str:
+        return json.dumps(self.as_structure(repo_name), indent=2)
+
+    def as_jsonl(self, repo_name: str, timestamp: str | None = None) -> str:
+        """One self-contained JSON object per file per line (JSON Lines)."""
+        # GUARDRAIL: each line repeats repo+timestamp so a single JSONL record stands alone —
+        # the memory system ingests files independently and must not depend on line order.
+        structure = self.as_structure(repo_name)
+        repo = structure["repo"]
+        ts = timestamp or structure["timestamp"]
+        rows = [
+            json.dumps({"repo": repo, "timestamp": ts, **f}, ensure_ascii=False)
+            for f in structure["files"]
+        ]
+        return "\n".join(rows) + ("\n" if rows else "")
 
     def as_html(self, repo_name: str) -> str:
         timestamp = datetime.now(timezone.utc).isoformat()
@@ -283,6 +322,22 @@ class Dump:
         return "\n".join(lines)
 
 
+def repo_name_for(root: Path) -> str:
+    resolved = root.resolve()
+    return resolved.name or resolved.parent.name
+
+
+def dump_to_format(dump: "Dump", repo_name: str, fmt: str = "text") -> str:
+    """Single place mapping a format name to a Dump method (text/json/jsonl/html)."""
+    if fmt == "json":
+        return dump.as_json(repo_name)
+    if fmt == "jsonl":
+        return dump.as_jsonl(repo_name)
+    if fmt == "html":
+        return dump.as_html(repo_name)
+    return dump.as_text(repo_name)
+
+
 def render(
     files: List[FileInfo],
     root: Path,
@@ -309,13 +364,43 @@ def render(
         contents_sort=contents_sort,
         tree_show_lines=tree_show_lines,
     )
-    resolved = root.resolve()
-    repo_name = resolved.name or resolved.parent.name
-    if fmt == "json":
-        return dump.as_json(repo_name)
-    if fmt == "html":
-        return dump.as_html(repo_name)
-    return dump.as_text(repo_name)
+    return dump_to_format(dump, repo_name_for(root), fmt)
+
+
+def build_dump(
+    root: Path,
+    *,
+    include: Iterable[str] | None = None,
+    exclude: Iterable[str] | None = None,
+    max_size: int = DEFAULT_MAX_SIZE,
+    binary_strict: bool = True,
+    max_tokens: int | None = None,
+    max_token_size_multiplier: float = DEFAULT_MAX_TOKEN_SIZE_MULTIPLIER,
+    tree_max_depth: Optional[int] = None,
+    tree_show_size: bool = False,
+    tree_sort_by: str = "name",
+    tree_dirs_first: bool = True,
+    contents_sort: str = DEFAULT_CONTENTS_SORT,
+    tree_show_lines: bool = False,
+) -> Dump:
+    """Collect files under *root* and build a Dump (a single walk).
+
+    GUARDRAIL: the CLI needs text + json + jsonl from ONE walk — calling render_repo
+    three times re-collects and re-reads every file three times.
+    """
+    files = collect_files(root, include, exclude, max_size=max_size, binary_strict=binary_strict)
+    return Dump(
+        files,
+        root,
+        max_tokens=max_tokens,
+        tree_max_depth=tree_max_depth,
+        tree_show_size=tree_show_size,
+        tree_sort_by=tree_sort_by,
+        tree_dirs_first=tree_dirs_first,
+        max_token_size_multiplier=max_token_size_multiplier,
+        contents_sort=contents_sort,
+        tree_show_lines=tree_show_lines,
+    )
 
 
 def render_repo(
@@ -343,18 +428,13 @@ def render_repo(
     # GUARDRAIL: cli.py and api.py used to duplicate this collect+render call
     # with identical option plumbing; one helper is the single source of truth
     # so options can't drift between the two entry points again.
-    files = collect_files(
+    dump = build_dump(
         root,
-        include,
-        exclude,
+        include=include,
+        exclude=exclude,
         max_size=max_size,
         binary_strict=binary_strict,
-    )
-    return render(
-        files,
-        root,
         max_tokens=max_tokens,
-        fmt=fmt,
         max_token_size_multiplier=max_token_size_multiplier,
         tree_max_depth=tree_max_depth,
         tree_show_size=tree_show_size,
@@ -363,6 +443,7 @@ def render_repo(
         contents_sort=contents_sort,
         tree_show_lines=tree_show_lines,
     )
+    return dump_to_format(dump, repo_name_for(root), fmt)
 
 
 # GUARDRAIL: defined at the END so it never swallows surrounding code — a big
